@@ -2,6 +2,23 @@ import type { GroundingSource, UserLocationContext } from '../src/types/chat';
 
 const WEB_FETCH_TIMEOUT_MS = 1400;
 
+async function fetchJsonWithTimeout(
+  url: string,
+  headers: Record<string, string> = { Accept: 'application/json' }
+): Promise<globalThis.Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), WEB_FETCH_TIMEOUT_MS);
+  try {
+    return await fetch(url, {
+      method: 'GET',
+      headers,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function stripHtmlTags(input: string): string {
   return input
     .replace(/<[^>]*>/g, ' ')
@@ -62,11 +79,7 @@ async function fetchOpenMeteoWeather(
       timezone
     )}`;
 
-    const res = await fetch(url, {
-      method: 'GET',
-      headers: { Accept: 'application/json' },
-      signal: AbortSignal.timeout(WEB_FETCH_TIMEOUT_MS),
-    });
+    const res = await fetchJsonWithTimeout(url);
     if (!res.ok) return null;
 
     const data = (await res.json()) as {
@@ -108,13 +121,9 @@ async function fetchWikipediaSummary(
       topic
     )}&srlimit=2&format=json&utf8=1`;
 
-    const res = await fetch(url, {
-      method: 'GET',
-      headers: {
-        Accept: 'application/json',
-        'User-Agent': 'ConsulAI/1.0 (https://localhost)',
-      },
-      signal: AbortSignal.timeout(WEB_FETCH_TIMEOUT_MS),
+    const res = await fetchJsonWithTimeout(url, {
+      Accept: 'application/json',
+      'User-Agent': 'ConsulAI/1.0 (https://localhost)',
     });
 
     if (!res.ok) return { lines: [], sources: [] };
@@ -155,11 +164,7 @@ async function fetchDuckDuckGoInstant(
       topic
     )}&format=json&no_html=1&skip_disambig=1`;
 
-    const res = await fetch(url, {
-      method: 'GET',
-      headers: { Accept: 'application/json' },
-      signal: AbortSignal.timeout(WEB_FETCH_TIMEOUT_MS),
-    });
+    const res = await fetchJsonWithTimeout(url);
 
     if (!res.ok) return { lines: [], sources: [] };
     const data = (await res.json()) as {

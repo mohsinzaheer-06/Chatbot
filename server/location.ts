@@ -1,4 +1,3 @@
-import { isIP } from 'node:net';
 import type { ClientContext, UserLocationContext } from '../src/types/chat';
 
 interface CachedGeo {
@@ -32,22 +31,68 @@ function readHeader(headers: HeaderBag, name: string): string | undefined {
   return direct;
 }
 
+function parseIpv4Octets(ip: string): number[] | null {
+  const parts = ip.split('.');
+  if (parts.length !== 4) return null;
+  const nums: number[] = [];
+  for (const part of parts) {
+    if (!/^(0|[1-9]\d{0,2})$/.test(part)) return null;
+    const val = Number(part);
+    if (!Number.isInteger(val) || val < 0 || val > 255) return null;
+    nums.push(val);
+  }
+  return nums;
+}
+
+function isValidIpv6(ip: string): boolean {
+  if (!ip.includes(':') || ip.length > 45) return false;
+  if (ip.includes(':::')) return false;
+  const doubleColonParts = ip.split('::');
+  if (doubleColonParts.length > 2) return false;
+
+  const validateGroups = (segment: string): { count: number; ok: boolean } => {
+    if (!segment) return { count: 0, ok: true };
+    const groups = segment.split(':');
+    for (let i = 0; i < groups.length; i++) {
+      const g = groups[i];
+      if (i === groups.length - 1 && g.includes('.')) {
+        if (!parseIpv4Octets(g)) return { count: 0, ok: false };
+        return { count: groups.length + 1, ok: true };
+      }
+      if (!/^[0-9a-fA-F]{1,4}$/.test(g)) return { count: 0, ok: false };
+    }
+    return { count: groups.length, ok: true };
+  };
+
+  if (doubleColonParts.length === 1) {
+    const res = validateGroups(doubleColonParts[0]);
+    return res.ok && res.count === 8;
+  }
+
+  const left = validateGroups(doubleColonParts[0]);
+  const right = validateGroups(doubleColonParts[1]);
+  return left.ok && right.ok && left.count + right.count < 8;
+}
+
+export function detectIpVersion(ip: string): 0 | 4 | 6 {
+  if (parseIpv4Octets(ip)) return 4;
+  if (isValidIpv6(ip)) return 6;
+  return 0;
+}
+
 export function normalizeIpCandidate(raw?: string | null): string | undefined {
   if (!raw) return undefined;
   let candidate = raw.trim();
   if (!candidate) return undefined;
 
-  // Strip surrounding quotes if present
   candidate = candidate.replace(/^["']|["']$/g, '').trim();
 
-  // Strip IPv6 bracket notation [::1]:1234
   if (candidate.startsWith('[')) {
     const closing = candidate.indexOf(']');
     if (closing !== -1) {
       candidate = candidate.slice(1, closing);
     }
   } else if (candidate.includes('.') && candidate.includes(':')) {
-    // IPv4 with port e.g. 203.0.113.5:41234 (ignore ::ffff:1.2.3.4)
     if (!candidate.toLowerCase().startsWith('::ffff:')) {
       const lastColon = candidate.lastIndexOf(':');
       const potentialPort = candidate.slice(lastColon + 1);
@@ -57,46 +102,48 @@ export function normalizeIpCandidate(raw?: string | null): string | undefined {
     }
   }
 
-  // Unwrap IPv4-mapped IPv6 addresses
   if (candidate.toLowerCase().startsWith('::ffff:')) {
     candidate = candidate.slice(7);
   }
 
-  return isIP(candidate) !== 0 ? candidate : undefined;
+  return detectIpVersion(candidate) !== 0 ? candidate : undefined;
 }
 
 export function isPublicRoutableIp(ip: string): boolean {
-  const version = isIP(ip);
+  const version = detectIpVersion(ip);
   if (version === 4) {
-    const parts = ip.split('.').map(Number);
-    if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) {
-      return false;
-    }
+    const parts = parseIpv4Octets(ip);
+    if (!parts) return false;
     const [a, b] = parts;
-    if (a === 0) return false; // 0.0.0.0/8
-    if (a === 10) return false; // 10.0.0.0/8 (RFC1918)
-    if (a === 100 && b >= 64 && b <= 127) return false; // 100.64.0.0/10 (CGNAT)
-    if (a === 127) return false; // 127.0.0.0/8 (Loopback)
-    if (a === 169 && b === 254) return false; // 169.254.0.0/16 (Link-local)
-    if (a === 172 && b >= 16 && b <= 31) return false; // 172.16.0.0/12 (RFC1918)
-    if (a === 192 && b === 0 && parts[2] === 0) return false; // 192.0.0.0/24
-    if (a === 192 && b === 168) return false; // 192.168.0.0/16 (RFC1918)
-    if (a === 198 && (b === 18 || b === 19)) return false; // Benchmark
-    if (a >= 224) return false; // Multicast & reserved
+    if (a === 0) return false;
+    if (a === 10) return false;
+    if (a === 100 && b >= 64 && b <= 127) return false;
+    if (a === 127) return false;
+    if (a === 169 && b === 254) return false;
+    if (a === 172 && b >= 16 && b <= 31) return false;
+    if (a === 192 && b === 0 && parts[2] === 0) return false;
+    if (a === 192 && b === 168) return false;
+    if (a === 198 && (b === 18 || b === 19)) return false;
+    if (a >= 224) return false;
     return true;
   }
 
   if (version === 6) {
     const lower = ip.toLowerCase();
     if (lower === '::' || lower === '::1') return false;
-    if (lower.startsWith('fe80:') || lower.startsWith('fe9') || lower.startsWith('fea') || lower.startsWith('feb')) {
-      return false; // Link-local fe80::/10
+    if (
+      lower.startsWith('fe80:') ||
+      lower.startsWith('fe9') ||
+      lower.startsWith('fea') ||
+      lower.startsWith('feb')
+    ) {
+      return false;
     }
     if (lower.startsWith('fc') || lower.startsWith('fd')) {
-      return false; // Unique local fc00::/7
+      return false;
     }
     if (lower.startsWith('ff')) {
-      return false; // Multicast
+      return false;
     }
     return true;
   }
@@ -171,6 +218,20 @@ function formatLocalDateTime(timeZone: string, now: Date): string {
   }
 }
 
+async function fetchWithTimeout(url: string, timeoutMs: number): Promise<globalThis.Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function lookupPublicIpGeo(ip: string): Promise<Omit<CachedGeo, 'expiresAt'> | null> {
   if (!isPublicRoutableIp(ip)) return null;
 
@@ -188,11 +249,10 @@ async function lookupPublicIpGeo(ip: string): Promise<Omit<CachedGeo, 'expiresAt
   }
 
   try {
-    const response = await fetch(`https://ipwho.is/${encodeURIComponent(ip)}`, {
-      method: 'GET',
-      headers: { Accept: 'application/json' },
-      signal: AbortSignal.timeout(GEO_FETCH_TIMEOUT_MS),
-    });
+    const response = await fetchWithTimeout(
+      `https://ipwho.is/${encodeURIComponent(ip)}`,
+      GEO_FETCH_TIMEOUT_MS
+    );
 
     if (!response.ok) return null;
     const data = (await response.json()) as {
